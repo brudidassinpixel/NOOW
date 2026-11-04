@@ -11,6 +11,7 @@
 <meta name="theme-color" content="#eef3f4" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#11191c" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="manifest.webmanifest">
+<script src="jspdf.umd.min.js" defer></script>
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -269,6 +270,7 @@
   .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); }
   .legend i { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--accent); vertical-align: middle; margin-right: 5px; }
   .legend i.b { border-top: 2px dashed var(--muted); }
+  .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
 </style>
 </head>
 <body>
@@ -302,7 +304,11 @@
   <div class="daypick" id="daypick" hidden></div>
 
   <div class="plan"><div class="grid" id="grid" aria-label="Wochenplan"></div></div>
-  <button type="button" class="btn full" id="long-btn" style="margin-top:12px">Langzeit-Analyse</button>
+  <div class="actions">
+    <button type="button" class="btn full" id="long-btn">Langzeit-Analyse</button>
+    <button type="button" class="btn full" id="pdf-btn">PDF erstellen</button>
+  </div>
+  <p class="msg" id="pdf-msg" role="status"></p>
 </div>
 
 <div class="bar" id="bar" hidden>
@@ -1253,6 +1259,137 @@
   }
   $('long-btn').addEventListener('click', openLong);
   $('lg-close').addEventListener('click', closeSheet);
+
+
+  // ---- PDF (A4 quer): die aktuell gewählte Woche des aktuell gewählten Plans
+  var PDF_RGB = [[188,220,240],[191,227,207],[246,211,168],[243,197,214],[216,205,240],[241,225,155]];
+  function pdfText(t) {                    // Standard-PDF-Schrift: Umlaute ja, Emojis und Sonderzeichen nein
+    return String(t == null ? '' : t)
+      .replace(/[‘’‚]/g, "'").replace(/[“”„]/g, '"')
+      .replace(/…/g, '...').replace(/[→➔]/g, '>').replace(/[–—]/g, '-')
+      .replace(/\r/g, '').replace(/[^\n\x20-\x7E -ÿ]/g, '');
+  }
+  function setPdfMsg(t) { $('pdf-msg').textContent = t || ''; }
+  function downloadBlob(blob, name) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a'); a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+    setPdfMsg('PDF erstellt: ' + name);
+  }
+  function savePdf(doc, name) {
+    var blob = doc.output('blob'), file = null;
+    try { file = new File([blob], name, { type: 'application/pdf' }); } catch (e) {}
+    var touch = (navigator.maxTouchPoints || 0) > 1;   // Teilen-Menü nur auf Handy und Tablet
+    if (touch && file && navigator.canShare && navigator.canShare({ files: [file] })) {
+      navigator.share({ files: [file], title: name }).then(function () { setPdfMsg(''); }, function (err) {
+        if (err && err.name === 'AbortError') { setPdfMsg(''); return; }
+        downloadBlob(blob, name);
+      });
+      return;
+    }
+    downloadBlob(blob, name);
+  }
+
+  function exportPdf() {
+    var lib = window.jspdf && window.jspdf.jsPDF;
+    if (!lib) { setPdfMsg('Das PDF-Modul ist noch nicht geladen. Öffne die App neu und versuche es noch einmal.'); return; }
+    try {
+      var diary = mode === 'diary';
+      var doc = new lib({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+      var PW = 297, M = 12, TIMEW = 14, HTOP = 22, HEADH = 7, ROWH = 12;
+      var colW = (PW - 2 * M - TIMEW) / 7, gx = M + TIMEW, gy = HTOP + HEADH;
+      var kw = isoWeek(weekStart), end = addDays(weekStart, 6), year = addDays(weekStart, 3).getFullYear();
+      var title = diary ? 'Gedankentagebuch' : 'Wochenplan';
+      var ink = [22, 35, 42], mute = [88, 104, 112], grid = [200, 211, 216], brand = [43, 111, 142];
+
+      doc.setProperties({ title: title + ' KW ' + kw + ' ' + year });
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(17); doc.setTextColor(brand[0], brand[1], brand[2]);
+      doc.text(title, M, 14);
+      doc.setFontSize(11); doc.setTextColor(ink[0], ink[1], ink[2]);
+      doc.text(pdfText('KW ' + kw + '  -  ' + fmt(weekStart) + ' bis ' + fmt(end) + ' ' + end.getFullYear()), PW - M, 14, { align: 'right' });
+
+      // Kopfzeile mit den Tagen
+      for (var d = 0; d < 7; d++) {
+        var dt = addDays(weekStart, d), x = gx + d * colW;
+        doc.setFillColor(d >= 5 ? 233 : 222, d >= 5 ? 238 : 234, d >= 5 ? 240 : 239);
+        doc.rect(x, HTOP, colW, HEADH, 'F');
+        doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(ink[0], ink[1], ink[2]);
+        doc.text(pdfText(FULL[d] + '  ' + dt.getDate() + '.' + (dt.getMonth() + 1) + '.'), x + colW / 2, HTOP + 4.7, { align: 'center' });
+      }
+      // Raster und Uhrzeiten
+      doc.setDrawColor(grid[0], grid[1], grid[2]); doc.setLineWidth(0.2);
+      for (var r = 0; r <= N; r++) doc.line(gx, gy + r * ROWH, gx + 7 * colW, gy + r * ROWH);
+      for (var c = 0; c <= 7; c++) doc.line(gx + c * colW, HTOP, gx + c * colW, gy + N * ROWH);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(mute[0], mute[1], mute[2]);
+      for (var s = 0; s < N; s++) doc.text(S[s] + '-' + E[s], gx - 1.5, gy + s * ROWH + 3.6, { align: 'right' });
+
+      // Einträge als verbundene Blöcke
+      var PAD = 1.1, LH = 2.9, usedColors = {};
+      weekEntries().forEach(function (e) {
+        var x = gx + e.day * colW + 0.5, y = gy + e.start * ROWH + 0.5;
+        var w = colW - 1, h = e.span * ROWH - 1, ci = (e.color || 0) % 6, rgb = PDF_RGB[ci];
+        usedColors[ci] = true;
+        doc.setFillColor(rgb[0], rgb[1], rgb[2]);
+        doc.roundedRect(x, y, w, h, 1.2, 1.2, 'F');
+
+        var head = [];
+        if (e.span > 1) head.push(S[e.start] + '-' + E[e.start + e.span - 1] + ' Uhr');
+        if (diary) { if (e.feel0 != null && e.feel1 != null) head.push('Gefuehl ' + e.feel0 + ' auf ' + e.feel1); }
+        else if (e.mood) head.push('Stimmung ' + MOOD_NAMES[e.mood - 1]);
+        var items = [];
+        if (head.length) items.push({ t: head.join('  |  '), st: 'bold', sz: 6, col: mute });
+        items.push({ t: diary ? e.situation : e.text, st: 'normal', sz: 7, col: ink });
+        if (diary) {
+          if (e.true0 != null && e.true1 != null) items.push({ t: 'Gedanke ' + e.true0 + ' auf ' + e.true1, st: 'normal', sz: 6.3, col: mute });
+          if (e.learn) items.push({ t: 'Gelernt: ' + e.learn, st: 'normal', sz: 6.3, col: mute });
+          if (distNames(e).length) items.push({ t: 'Denkfehler: ' + distNames(e).join(', '), st: 'normal', sz: 6.3, col: mute });
+        } else if (e.note) items.push({ t: e.note, st: 'normal', sz: 6.3, col: mute });
+
+        var lines = [];
+        items.forEach(function (it) {
+          doc.setFont('helvetica', it.st); doc.setFontSize(it.sz);
+          doc.splitTextToSize(pdfText(it.t).replace('Gefuehl', 'Gefühl'), w - 2 * PAD).forEach(function (l) {
+            lines.push({ t: l, st: it.st, sz: it.sz, col: it.col });
+          });
+        });
+        var maxLines = Math.max(1, Math.floor((h - 2 * PAD + 0.6) / LH));
+        if (lines.length > maxLines) {
+          lines = lines.slice(0, maxLines);
+          var last = lines[maxLines - 1];
+          doc.setFont('helvetica', last.st); doc.setFontSize(last.sz);
+          while (last.t.length > 1 && doc.getTextWidth(last.t + '...') > w - 2 * PAD) last.t = last.t.slice(0, -1);
+          last.t = last.t.replace(/\s+$/, '') + '...';
+        }
+        lines.forEach(function (l, i) {
+          doc.setFont('helvetica', l.st); doc.setFontSize(l.sz); doc.setTextColor(l.col[0], l.col[1], l.col[2]);
+          doc.text(l.t, x + PAD, y + PAD + 2 + i * LH);
+        });
+      });
+
+      // Fußzeile: benannte Farben und Datum
+      var fy = gy + N * ROWH + 6, fx = M;
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5);
+      Object.keys(usedColors).forEach(function (k) {
+        var nm = colorName(+k); if (!nm) return;
+        var rgb = PDF_RGB[+k];
+        doc.setFillColor(rgb[0], rgb[1], rgb[2]); doc.setDrawColor(grid[0], grid[1], grid[2]);
+        doc.roundedRect(fx, fy - 2.7, 3.4, 3.4, 0.8, 0.8, 'FD');
+        doc.setTextColor(ink[0], ink[1], ink[2]);
+        var label = pdfText(nm); doc.text(label, fx + 5, fy);
+        fx += 5 + doc.getTextWidth(label) + 7;
+      });
+      var now = new Date();
+      doc.setTextColor(mute[0], mute[1], mute[2]);
+      doc.text('Erstellt am ' + now.getDate() + '.' + (now.getMonth() + 1) + '.' + now.getFullYear(), PW - M, fy, { align: 'right' });
+
+      savePdf(doc, title + '_KW' + kw + '_' + year + '.pdf');
+    } catch (err) {
+      setPdfMsg('Das PDF konnte nicht erstellt werden.');
+      if (window.console) console.error(err);
+    }
+  }
+  $('pdf-btn').addEventListener('click', exportPdf);
 
   if ('serviceWorker' in navigator) { navigator.serviceWorker.register('sw.js').catch(function () {}); }
 
